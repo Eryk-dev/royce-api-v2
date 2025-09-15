@@ -322,7 +322,7 @@ class ImageProcessorService:
             return None
 
     async def process_image(self, image_path, image_type="auto", enable_crop=True, 
-                          apply_corner_dots=True, apply_rotation=True):
+                          apply_corner_dots=True, apply_rotation=True, original_name: Optional[str] = None):
         """
         Processa uma imagem completa
         
@@ -356,11 +356,12 @@ class ImageProcessorService:
                 logger.error("Falha no preprocessamento")
                 return None
             
-            # Processar com Qwen
+            # Processar com Qwen (usar nome original, se informado, para nomear saída)
+            original_for_naming = (original_name or Path(image_path).name)
             result = await self.generate_from_qwen(
                 preprocessed, 
                 prompt, 
-                Path(image_path).name
+                original_for_naming
             )
             
             if not result:
@@ -402,10 +403,12 @@ class ImageProcessorService:
                     "size": final_path.stat().st_size
                 }
             else:
-                # Não salvar: retornar base64 direto
+                # Não salvar: retornar base64 direto e um nome coerente
                 b64 = self.encode_pil_to_base64(formatted)
+                filename_stem = Path(result['filename']).stem if result.get('filename') else Path(original_for_naming).stem
+                final_name = f"{filename_stem}_formatted.jpg"
                 return {
-                    "filename": None,
+                    "filename": final_name,
                     "path": None,
                     "type": image_type,
                     "size": len(b64) if b64 else 0,

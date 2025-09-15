@@ -103,7 +103,7 @@ class ImageProcessResponse(BaseModel):
 
 class ImageUrlProcessRequest(BaseModel):
     url: str = Field(..., description="URL pública da imagem")
-    image_type: str = Field("auto", description="technical|normal|auto")
+    image_type: str = Field("auto", description="technical|normal|auto (auto detecta por sufixo _tec no filename)")
     enable_crop: bool = True
     apply_corner_dots: bool = True
     apply_rotation: bool = True
@@ -116,6 +116,15 @@ class ImageUrlProcessResponse(BaseModel):
     processing_time: Optional[float] = None
     base64: Optional[str] = None
     error: Optional[str] = None
+
+class ImageUrlsBatchRequest(BaseModel):
+    urls: List[str] = Field(..., description="Lista de URLs de imagens")
+    enable_crop: bool = True
+    apply_corner_dots: bool = True
+    apply_rotation: bool = True
+
+class ImageUrlsBatchResponse(BaseModel):
+    results: List[ImageUrlProcessResponse]
 
 class HealthResponse(BaseModel):
     status: str
@@ -352,6 +361,12 @@ async def process_image_from_url(
 
         logger.info(f"Baixando imagem da URL: {request.url}")
 
+        # Auto-detectar tipo pelo nome da URL se image_type=auto
+        detected_type = request.image_type
+        if request.image_type == "auto":
+            filename_lower = request.url.lower()
+            detected_type = "technical" if "_tec" in filename_lower else "normal"
+
         # Baixar imagem para arquivo temporário
         temp_path = image_processor_service.download_image_to_tempfile(request.url)
         if not temp_path:
@@ -360,10 +375,11 @@ async def process_image_from_url(
         start_time = datetime.now()
         result = await image_processor_service.process_image(
             image_path=temp_path,
-            image_type=request.image_type,
+            image_type=detected_type,
             enable_crop=request.enable_crop,
             apply_corner_dots=request.apply_corner_dots,
-            apply_rotation=request.apply_rotation
+            apply_rotation=request.apply_rotation,
+            original_name=request.url.split('/')[-1]
         )
 
         # Remover arquivo temporário
@@ -406,6 +422,101 @@ async def process_image_from_url(
         raise
     except Exception as e:
         logger.error(f"Erro ao processar imagem por URL: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/pictures/urls", response_model=ImageUrlsBatchResponse)
+async def process_images_batch(
+    request: ImageUrlsBatchRequest
+):
+    """
+    Processa múltiplas imagens em paralelo.
+    - Detecta automaticamente 'technical' quando a URL contém '_tec'.
+    - Retorna base64 de cada imagem final no campo base64.
+    """
+    try:
+        if not os.getenv("DASHSCOPE_API_KEY"):
+            raise HTTPException(status_code=503, detail="Serviço indisponível - DASHSCOPE_API_KEY não configurada")
+
+        async def _process_one(url: str) -> ImageUrlProcessResponse:
+            try:
+                filename_lower = url.lower()
+                detected_type = "technical" if "_tec" in filename_lower else "normal"
+
+                temp_path = image_processor_service.download_image_to_tempfile(url)
+                if not temp_path:
+                    return ImageUrlProcessResponse(
+                        success=False,
+                        message="Falha ao baixar a imagem",
+                        source_url=url,
+                        processed_filename=None,
+                        processing_time=None,
+                        base64=None,
+                        error="Download falhou"
+                    )
+
+                start_time = datetime.now()
+                result = await image_processor_service.process_image(
+                    image_path=temp_path,
+                    image_type=detected_type,
+                    enable_crop=request.enable_crop,
+                    apply_corner_dots=request.apply_corner_dots,
+                    apply_rotation=request.apply_rotation,
+                    original_name=url.split('/')[-1]
+                )
+
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+                processing_time = (datetime.now() - start_time).total_seconds()
+
+                if not result:
+                    return ImageUrlProcessResponse(
+                        success=False,
+                        message="Falha ao processar imagem",
+                        source_url=url,
+                        processed_filename=None,
+                        processing_time=processing_time,
+                        base64=None,
+                        error="Processamento falhou"
+                    )
+
+                if result.get("path"):
+                    final_base64 = image_processor_service.encode_image_file_to_base64(result["path"]) or ""
+                else:
+                    final_base64 = result.get("base64") or ""
+
+                return ImageUrlProcessResponse(
+                    success=True,
+                    message=f"Imagem processada com sucesso como tipo '{result['type']}'",
+                    source_url=url,
+                    processed_filename=result.get("filename"),
+                    processing_time=processing_time,
+                    base64=final_base64,
+                    error=None
+                )
+            except Exception as ex:
+                logger.error(f"Erro no item {url}: {ex}")
+                return ImageUrlProcessResponse(
+                    success=False,
+                    message="Erro ao processar imagem",
+                    source_url=url,
+                    processed_filename=None,
+                    processing_time=None,
+                    base64=None,
+                    error=str(ex)
+                )
+
+        # Executar em paralelo
+        import asyncio as _asyncio
+        tasks = [_asyncio.create_task(_process_one(u)) for u in request.urls]
+        results = await _asyncio.gather(*tasks)
+        return ImageUrlsBatchResponse(results=results)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro no processamento em lote de imagens: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/produtos/batch", response_model=Dict[str, Any])
