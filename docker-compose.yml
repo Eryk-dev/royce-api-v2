@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  royce-api:
+    build: .
+    container_name: royce-api
+    restart: unless-stopped
+    ports:
+      - "5682:5682"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - API_HOST=0.0.0.0
+      - API_PORT=5682
+      - SAVE_OUTPUT_FILES=${SAVE_OUTPUT_FILES:-false}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+      - ./temp_uploads:/app/temp_uploads
+    networks:
+      - royce-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  nginx:
+    image: nginx:alpine
+    container_name: royce-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - royce-api
+    networks:
+      - royce-network
+
+networks:
+  royce-network:
+    driver: bridge
+
+volumes:
+  output:
+  logs:
+  temp_uploads:
+

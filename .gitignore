@@ -1,0 +1,34 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+
+# Virtualenv
+venv/
+.env
+.env.*
+*.env
+
+# Project outputs
+output/
+logs/
+temp_uploads/
+uvicorn.log
+api.log
+
+# SSL (keep certs out of git)
+ssl/*
+!ssl/README.md
+
+# Node/Frontend (if any)
+node_modules/
+
+# IDE
+.vscode/
+.idea/

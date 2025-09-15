@@ -1,0 +1,40 @@
+# Core dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+python-dotenv==1.0.0
+pydantic==2.5.0
+
+# Web scraping
+selenium==4.15.2
+webdriver-manager==4.0.1
+
+# AI/ML APIs
+google-generativeai==0.3.0
+dashscope==1.14.0
+
+# Image processing
+Pillow==10.1.0
+opencv-python==4.8.1.78
+
+# Utilities
+requests==2.31.0
+aiofiles==23.2.1
+tqdm==4.66.1
+
+# Logging and monitoring
+python-json-logger==2.0.7
+
+# Testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.1
+
+# Performance
+asyncio==3.4.3
+aiodns==3.1.1
+
+# Database (optional, for future use)
+# sqlalchemy==2.0.23
+# aiosqlite==0.19.0
+
