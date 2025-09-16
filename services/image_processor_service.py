@@ -190,17 +190,26 @@ class ImageProcessorService:
     def preprocess_normal_image(self, image_path):
         """
         Preprocessa imagem normal:
-        Adiciona quadrado branco central nas coordenadas específicas
+        Adiciona quadrado branco e AUMENTA 10% para a esquerda (sem deslocar a borda direita)
         """
         try:
             img = Image.open(image_path)
             img = img.convert('RGB')
             
-            # Coordenadas do retângulo branco central
-            x1 = 1254
-            y1 = 1390
-            x2 = x1 + 183
-            y2 = y1 + 45
+            # Coordenadas base do retângulo branco (largura 183, altura 45)
+            base_x1 = 1254
+            base_y1 = 1390
+            rect_w = 183
+            rect_h = 45
+
+            # Aumentar 10% da largura do retângulo para a esquerda, mantendo a borda direita fixa
+            img_width, img_height = img.size
+            base_x2 = base_x1 + rect_w
+            new_rect_w = int(round(rect_w * 1.10))
+            x1 = max(0, base_x2 - new_rect_w)
+            y1 = base_y1
+            x2 = min(img_width, base_x2)
+            y2 = min(img_height, y1 + rect_h)
             
             # Desenhar quadrado branco
             draw = ImageDraw.Draw(img)
