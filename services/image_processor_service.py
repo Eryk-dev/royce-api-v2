@@ -492,10 +492,17 @@ class ImageProcessorService:
                 formatted = self.format_image(processed_img, apply_rotation=apply_rotation)
             
             if self.save_files:
-                # Salvar imagem final (garantir extensão .jpg)
-                filename_stem = Path(result['filename']).stem
-                final_path = self.output_dir / f"{filename_stem}_formatted.jpg"
-                formatted.save(final_path, 'JPEG', quality=95)
+                # Salvar com o mesmo nome do arquivo de entrada (sem prefixos/sufixos)
+                original_filename_only = Path(original_for_naming).name
+                final_path = self.output_dir / original_filename_only
+
+                ext = final_path.suffix.lower()
+                save_format = 'JPEG' if ext in ('.jpg', '.jpeg') else ('PNG' if ext == '.png' else 'JPEG')
+
+                if save_format == 'JPEG':
+                    formatted.save(final_path, 'JPEG', quality=95)
+                else:
+                    formatted.save(final_path, save_format)
 
                 # Limpar arquivo intermediário se existe
                 try:
@@ -511,10 +518,9 @@ class ImageProcessorService:
                     "size": final_path.stat().st_size
                 }
             else:
-                # Não salvar: retornar base64 direto e um nome coerente
+                # Não salvar: retornar base64 direto com o mesmo nome do arquivo de entrada
                 b64 = self.encode_pil_to_base64(formatted)
-                filename_stem = Path(result['filename']).stem if result.get('filename') else Path(original_for_naming).stem
-                final_name = f"{filename_stem}_formatted.jpg"
+                final_name = Path(original_for_naming).name
                 return {
                     "filename": final_name,
                     "path": None,
