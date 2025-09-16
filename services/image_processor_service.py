@@ -9,6 +9,8 @@ import mimetypes
 import requests
 import logging
 import asyncio
+import json
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 from PIL import Image, ImageDraw, ImageChops
@@ -18,6 +20,10 @@ from dashscope import MultiModalConversation
 from dotenv import load_dotenv
 import uuid
 import tempfile
+from collections import deque
+class QuotaExceededError(Exception):
+    """Erro lançado quando a cota gratuita é excedida."""
+
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,26 @@ class ImageProcessorService:
         # Flag: salvar arquivos finais/intermediários? Default: False (modo consulta)
         self.save_files = os.getenv("SAVE_OUTPUT_FILES", "false").lower() in ("1", "true", "yes")
         
+        # Limites (podem ser customizados por ENV)
+        self.rps_limit = int(os.getenv("DASHSCOPE_RPS_LIMIT", "2"))
+        self.max_concurrent = int(os.getenv("DASHSCOPE_MAX_CONCURRENT", "2"))
+        self.free_quota = int(os.getenv("DASHSCOPE_FREE_QUOTA", "100"))
+        
+        # Concurrency control
+        self._concurrency_semaphore = asyncio.Semaphore(self.max_concurrent)
+        
+        # Simple RPS limiter (tokenized by timestamps in a 1s window)
+        self._rps_lock = asyncio.Lock()
+        self._submission_window = deque()  # stores time.monotonic()
+        
+        # Quota tracking (daily reset)
+        self._quota_lock = asyncio.Lock()
+        self._quota_file = Path("logs") / "qwen_usage.json"
+        self._quota_file.parent.mkdir(exist_ok=True)
+        self._quota_date = datetime.now().date().isoformat()
+        self._quota_count = 0
+        self._load_quota_state()
+        
         if self.api_key:
             # Configurar base URL para Singapore/Global region
             dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
@@ -40,6 +66,83 @@ class ImageProcessorService:
         # Diretórios de saída
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
+
+    def _load_quota_state(self):
+        try:
+            if self._quota_file.exists():
+                data = json.loads(self._quota_file.read_text(encoding="utf-8"))
+                file_date = data.get("date")
+                count = int(data.get("count", 0))
+                today = datetime.now().date().isoformat()
+                if file_date == today:
+                    self._quota_date = file_date
+                    self._quota_count = count
+                else:
+                    # reset for new day
+                    self._quota_date = today
+                    self._quota_count = 0
+                    self._save_quota_state()
+            else:
+                self._save_quota_state()
+        except Exception as e:
+            logger.warning(f"Falha ao carregar estado de cota: {e}")
+
+    def _save_quota_state(self):
+        try:
+            data = {"date": self._quota_date, "count": self._quota_count}
+            self._quota_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Falha ao salvar estado de cota: {e}")
+
+    async def _reserve_quota(self, units: int = 1):
+        """Reserva cota antes de submeter tarefas ao provedor.
+        Reseta diariamente.
+        Lança QuotaExceededError se exceder a cota configurada.
+        """
+        async with self._quota_lock:
+            today = datetime.now().date().isoformat()
+            if self._quota_date != today:
+                self._quota_date = today
+                self._quota_count = 0
+            if self._quota_count + units > self.free_quota:
+                raise QuotaExceededError(
+                    f"Limite de {self.free_quota} imagens/dia atingido. Tente novamente amanhã ou aumente a cota."
+                )
+            self._quota_count += units
+            self._save_quota_state()
+
+    async def _wait_for_rps_slot(self):
+        """Garante no máximo self.rps_limit submissões por segundo."""
+        while True:
+            async with self._rps_lock:
+                now = time.monotonic()
+                # purge entries older than 1s
+                while self._submission_window and (now - self._submission_window[0]) >= 1.0:
+                    self._submission_window.popleft()
+                if len(self._submission_window) < self.rps_limit:
+                    self._submission_window.append(now)
+                    return
+                # tempo até liberar um slot
+                sleep_time = 1.0 - (now - self._submission_window[0])
+            await asyncio.sleep(max(0.0, sleep_time))
+
+    def quota_status(self) -> Dict[str, Any]:
+        """Retorna status atual da cota diária."""
+        try:
+            today = datetime.now().date().isoformat()
+            # se mudou o dia e ainda não houve operação, refletir no retorno
+            used = self._quota_count if self._quota_date == today else 0
+            remaining = max(0, self.free_quota - used)
+            return {
+                "date": today,
+                "limit": self.free_quota,
+                "used": used,
+                "remaining": remaining,
+                "rps_limit": self.rps_limit,
+                "max_concurrent": self.max_concurrent,
+            }
+        except Exception:
+            return {"date": datetime.now().date().isoformat(), "limit": self.free_quota, "used": 0, "remaining": self.free_quota}
 
     def preprocess_technical_image(self, image_path, enable_crop=True):
         """
@@ -174,9 +277,11 @@ class ImageProcessorService:
             logger.error("DASHSCOPE_API_KEY não configurada")
             return None
         
-        # Executar em thread separada
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._generate_sync, image, prompt, original_filename)
+        # Respeitar RPS e concorrência
+        await self._wait_for_rps_slot()
+        async with self._concurrency_semaphore:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._generate_sync, image, prompt, original_filename)
     
     def _generate_sync(self, image, prompt, original_filename):
         """Versão síncrona da geração"""
@@ -337,6 +442,9 @@ class ImageProcessorService:
             Dict com resultado do processamento
         """
         try:
+            # Verificar e reservar cota (contabiliza submissões ao provedor)
+            await self._reserve_quota(1)
+            
             # Detectar tipo se auto
             if image_type == "auto":
                 filename = Path(image_path).name
@@ -415,6 +523,9 @@ class ImageProcessorService:
                     "base64": b64
                 }
             
+        except QuotaExceededError:
+            # Propagar para que o endpoint possa retornar 429
+            raise
         except Exception as e:
             logger.error(f"Erro ao processar imagem: {e}")
             return None

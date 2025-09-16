@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime
 import json
 import uvicorn
+from starlette.status import HTTP_429_TOO_MANY_REQUESTS
 
 # Importar serviços
 from services.scraping_service import ScrapingService
@@ -312,13 +313,23 @@ async def process_image(
         # Processar imagem
         start_time = datetime.now()
         
-        resultado = await image_processor_service.process_image(
-            image_path=str(temp_path),
-            image_type=image_type,
-            enable_crop=enable_crop,
-            apply_corner_dots=apply_corner_dots,
-            apply_rotation=apply_rotation
-        )
+        try:
+            resultado = await image_processor_service.process_image(
+                image_path=str(temp_path),
+                image_type=image_type,
+                enable_crop=enable_crop,
+                apply_corner_dots=apply_corner_dots,
+                apply_rotation=apply_rotation
+            )
+        except Exception as ex:
+            # Mapear erro de cota do provedor para 429
+            if ex.__class__.__name__ == 'QuotaExceededError':
+                qs = image_processor_service.quota_status()
+                raise HTTPException(
+                    status_code=HTTP_429_TOO_MANY_REQUESTS,
+                    detail={"message": "Cota diária de imagens atingida", "quota": qs}
+                )
+            raise
         
         processing_time = (datetime.now() - start_time).total_seconds()
         
@@ -373,7 +384,8 @@ async def process_image_from_url(
             raise HTTPException(status_code=400, detail="Falha ao baixar a imagem da URL")
 
         start_time = datetime.now()
-        result = await image_processor_service.process_image(
+        try:
+            result = await image_processor_service.process_image(
             image_path=temp_path,
             image_type=detected_type,
             enable_crop=request.enable_crop,
@@ -381,6 +393,15 @@ async def process_image_from_url(
             apply_rotation=request.apply_rotation,
             original_name=request.url.split('/')[-1]
         )
+        except Exception as ex:
+            # Mapear erro de cota
+            if ex.__class__.__name__ == 'QuotaExceededError':
+                qs = image_processor_service.quota_status()
+                raise HTTPException(
+                    status_code=HTTP_429_TOO_MANY_REQUESTS,
+                    detail={"message": "Cota diária de imagens atingida", "quota": qs}
+                )
+            raise
 
         # Remover arquivo temporário
         try:
@@ -437,6 +458,18 @@ async def process_images_batch(
         if not os.getenv("DASHSCOPE_API_KEY"):
             raise HTTPException(status_code=503, detail="Serviço indisponível - DASHSCOPE_API_KEY não configurada")
 
+        # Pré-checagem de cota: se não houver cota suficiente para o lote, retornar 429
+        try:
+            qs = image_processor_service.quota_status()
+            remaining = int(qs.get("remaining", 0))
+        except Exception:
+            remaining = 0
+        if len(request.urls) > 0 and remaining <= 0:
+            raise HTTPException(
+                status_code=HTTP_429_TOO_MANY_REQUESTS,
+                detail={"message": "Cota diária de imagens atingida", "quota": image_processor_service.quota_status()}
+            )
+
         async def _process_one(url: str) -> ImageUrlProcessResponse:
             try:
                 filename_lower = url.lower()
@@ -455,7 +488,8 @@ async def process_images_batch(
                     )
 
                 start_time = datetime.now()
-                result = await image_processor_service.process_image(
+                try:
+                    result = await image_processor_service.process_image(
                     image_path=temp_path,
                     image_type=detected_type,
                     enable_crop=request.enable_crop,
@@ -463,6 +497,19 @@ async def process_images_batch(
                     apply_rotation=request.apply_rotation,
                     original_name=url.split('/')[-1]
                 )
+                except Exception as ex:
+                    if ex.__class__.__name__ == 'QuotaExceededError':
+                        qs = image_processor_service.quota_status()
+                        return ImageUrlProcessResponse(
+                            success=False,
+                            message="Cota diária de imagens atingida",
+                            source_url=url,
+                            processed_filename=None,
+                            processing_time=None,
+                            base64=None,
+                            error=json.dumps(qs)
+                        )
+                    raise
 
                 try:
                     os.remove(temp_path)
@@ -517,6 +564,15 @@ async def process_images_batch(
         raise
     except Exception as e:
         logger.error(f"Erro no processamento em lote de imagens: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/pictures/quota", response_model=Dict[str, Any])
+async def get_pictures_quota():
+    """Retorna o status atual de cota/limites do editor de imagens."""
+    try:
+        return image_processor_service.quota_status()
+    except Exception as e:
+        logger.error(f"Erro ao obter status de cota: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/produtos/batch", response_model=Dict[str, Any])
