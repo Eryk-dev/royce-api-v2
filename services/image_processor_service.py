@@ -15,8 +15,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from PIL import Image, ImageDraw, ImageChops
 from datetime import datetime
-import dashscope
-from dashscope import MultiModalConversation
 from dotenv import load_dotenv
 import uuid
 import tempfile
@@ -32,7 +30,7 @@ class ImageProcessorService:
         """Inicializa o processador de imagens"""
         load_dotenv()
         
-        self.api_key = os.getenv("DASHSCOPE_API_KEY")
+        self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("SILICONFLOW_API_KEY")
         # Flag: salvar arquivos finais/intermediários? Default: False (modo consulta)
         self.save_files = os.getenv("SAVE_OUTPUT_FILES", "false").lower() in ("1", "true", "yes")
         
@@ -57,11 +55,10 @@ class ImageProcessorService:
         self._load_quota_state()
         
         if self.api_key:
-            # Configurar base URL para Singapore/Global region
-            dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
-            logger.info("DashScope API configurada com sucesso")
+            self.siliconflow_endpoint = 'https://api.siliconflow.com/v1/images/generations'
+            logger.info("SiliconFlow API configurada com sucesso")
         else:
-            logger.warning("DASHSCOPE_API_KEY não encontrada")
+            logger.warning("Chave da API para SiliconFlow não encontrada (use SILICONFLOW_API_KEY ou DASHSCOPE_API_KEY)")
         
         # Diretórios de saída
         self.output_dir = Path("output")
@@ -299,39 +296,55 @@ class ImageProcessorService:
             if not data_uri:
                 logger.error("Falha ao codificar imagem")
                 return None
-            
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"image": data_uri},
-                    {"text": prompt}
-                ]
-            }]
 
-            # Chamar DashScope
-            response = MultiModalConversation.call(
-                api_key=self.api_key,
-                model="qwen-image-edit",
-                messages=messages,
-                result_format='message',
-                stream=False,
-                watermark=False,
-                negative_prompt="logos, watermark, text overlays, header, footer"
-            )
+            # Monta payload para SiliconFlow (API OpenAI-like)
+            payload = {
+                "model": "Qwen/Qwen-Image-Edit",
+                "prompt": prompt,
+                # Tamanho exigido pela API; recomendamos 1328x1328 (1:1). O pipeline depois redimensiona para 1200x1200.
+                "image_size": "1328x1328",
+                "num_inference_steps": 20,
+                "guidance_scale": 7.5,
+                "batch_size": 1,
+                # Mantém a mesma lógica de negative prompt usada anteriormente
+                "negative_prompt": "logos, watermark, text overlays, header, footer",
+                # Imagem em data URI (PNG) já suportada por encode_image_to_data_uri
+                "image": data_uri
+            }
 
-            # Verificar resposta
-            if getattr(response, "status_code", None) == 200 and "output" in response:
-                choices = response["output"].get("choices", [])
-                if choices and "message" in choices[0]:
-                    contents = choices[0]["message"].get("content", [])
-                    for part in contents:
-                        if isinstance(part, dict) and "image" in part:
-                            # Baixar resultado (em memória e opcionalmente salvar)
-                            return self._download_qwen_result(part["image"], original_filename)
-            
-            logger.error("Resposta inválida do Qwen")
-            return None
-            
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            try:
+                resp = requests.post(self.siliconflow_endpoint, headers=headers, json=payload, timeout=120)
+            except Exception as req_err:
+                logger.error(f"Erro de rede ao chamar SiliconFlow: {req_err}")
+                return None
+
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception as parse_err:
+                    logger.error(f"Falha ao parsear resposta da SiliconFlow: {parse_err}")
+                    return None
+
+                images = data.get("images") or []
+                if images and isinstance(images, list) and isinstance(images[0], dict) and images[0].get("url"):
+                    return self._download_qwen_result(images[0]["url"], original_filename)
+
+                logger.error("Resposta da SiliconFlow sem URL de imagem")
+                return None
+
+            else:
+                # Log detalhado para debug
+                try:
+                    err_text = resp.text
+                except Exception:
+                    err_text = str(resp)
+                logger.error(f"SiliconFlow retornou status {resp.status_code}: {err_text}")
+                return None
         except Exception as e:
             logger.error(f"Erro na chamada Qwen: {e}")
             return None
