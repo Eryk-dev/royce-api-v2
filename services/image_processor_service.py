@@ -64,6 +64,16 @@ class ImageProcessorService:
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
 
+        # Referências para posicionamento proporcional do retângulo em imagens normais
+        # Base adotada: 1600x1600 (ajustável por ENV)
+        self.normal_ref_width = int(os.getenv("NORMAL_REF_WIDTH", "1600"))
+        self.normal_ref_height = int(os.getenv("NORMAL_REF_HEIGHT", "1600"))
+        # Métricas base do retângulo (antes de aplicar o aumento de 10%)
+        self.normal_rect_base_x1 = int(os.getenv("NORMAL_RECT_BASE_X1", "1254"))
+        self.normal_rect_base_y1 = int(os.getenv("NORMAL_RECT_BASE_Y1", "1390"))
+        self.normal_rect_base_w = int(os.getenv("NORMAL_RECT_BASE_W", "183"))
+        self.normal_rect_base_h = int(os.getenv("NORMAL_RECT_BASE_H", "45"))
+
     def _load_quota_state(self):
         try:
             if self._quota_file.exists():
@@ -187,28 +197,44 @@ class ImageProcessorService:
     def preprocess_normal_image(self, image_path):
         """
         Preprocessa imagem normal:
-        Adiciona quadrado branco e AUMENTA 10% para a esquerda (sem deslocar a borda direita)
+        Adiciona quadrado branco proporcional ao tamanho da imagem
+        (regra de 3 baseada em resolução de referência) e AUMENTA 10% para a esquerda
+        mantendo a borda direita fixa.
         """
         try:
             img = Image.open(image_path)
             img = img.convert('RGB')
             
-            # Coordenadas base do retângulo branco (largura 183, altura 45)
-            base_x1 = 1254
-            base_y1 = 1390
-            rect_w = 183
-            rect_h = 45
+            # Coordenadas base do retângulo branco (na resolução de referência)
+            base_x1 = self.normal_rect_base_x1
+            base_y1 = self.normal_rect_base_y1
+            rect_w = self.normal_rect_base_w
+            rect_h = self.normal_rect_base_h
 
             # Aumentar 10% da largura do retângulo para a esquerda, mantendo a borda direita fixa
             img_width, img_height = img.size
-            base_x2 = base_x1 + rect_w
-            new_rect_w = int(round(rect_w * 1.10))
+            ref_w = self.normal_ref_width
+            ref_h = self.normal_ref_height
 
-            # Coordenadas pretendidas
+            # Escalar posição e tamanho pela regra de 3
+            # Posições inteiras finais arredondadas
+            scaled_x1 = int(round(base_x1 * img_width / ref_w))
+            scaled_y1 = int(round(base_y1 * img_height / ref_h))
+            scaled_w  = int(round(rect_w * img_width / ref_w))
+            scaled_h  = int(round(rect_h * img_height / ref_h))
+
+            # Garante tamanhos mínimos positivos
+            scaled_w = max(1, scaled_w)
+            scaled_h = max(1, scaled_h)
+
+            base_x2 = scaled_x1 + scaled_w
+            new_rect_w = int(round(scaled_w * 1.10))
+
+            # Coordenadas pretendidas já proporcionais
             intended_x1 = base_x2 - new_rect_w
-            intended_y1 = base_y1
+            intended_y1 = scaled_y1
             intended_x2 = base_x2
-            intended_y2 = base_y1 + rect_h
+            intended_y2 = scaled_y1 + scaled_h
 
             # Ajuste/clamp para ficar dentro da imagem
             x1 = max(0, min(intended_x1, img_width))
