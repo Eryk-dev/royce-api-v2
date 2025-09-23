@@ -203,11 +203,26 @@ class ImageProcessorService:
             img_width, img_height = img.size
             base_x2 = base_x1 + rect_w
             new_rect_w = int(round(rect_w * 1.10))
-            x1 = max(0, base_x2 - new_rect_w)
-            y1 = base_y1
-            x2 = min(img_width, base_x2)
-            y2 = min(img_height, y1 + rect_h)
-            
+
+            # Coordenadas pretendidas
+            intended_x1 = base_x2 - new_rect_w
+            intended_y1 = base_y1
+            intended_x2 = base_x2
+            intended_y2 = base_y1 + rect_h
+
+            # Ajuste/clamp para ficar dentro da imagem
+            x1 = max(0, min(intended_x1, img_width))
+            y1 = max(0, min(intended_y1, img_height))
+            x2 = max(0, min(intended_x2, img_width))
+            y2 = max(0, min(intended_y2, img_height))
+
+            # Se após o clamp o retângulo ficou inválido (sem área), pular sem erro
+            if x2 <= x1 or y2 <= y1:
+                logger.info(
+                    f"Skip white rectangle: out-of-bounds for image {img_width}x{img_height}"
+                )
+                return img
+
             # Desenhar quadrado branco
             draw = ImageDraw.Draw(img)
             draw.rectangle([x1, y1, x2, y2], fill='white')
