@@ -66,17 +66,16 @@ class ImageProcessorService:
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
 
-        # Configuração de retângulo proporcional (imagens normais)
-        # Padrões baseados na referência 1600x1600 onde:
-        # - x2% ≈ 0.898, y2% ≈ 0.897 (âncora canto inferior direito)
-        # - largura% ≈ 0.114 e altura% ≈ 0.028125
-        self.normal_rect_x2_pct = float(os.getenv("NORMAL_RECT_X2_PCT", "0.898"))
-        self.normal_rect_y2_pct = float(os.getenv("NORMAL_RECT_Y2_PCT", "0.897"))
-        self.normal_rect_w_pct = float(os.getenv("NORMAL_RECT_W_PCT", "0.114"))
-        self.normal_rect_h_pct = float(os.getenv("NORMAL_RECT_H_PCT", "0.028125"))
+        # Configuração do retângulo para imagens normais (valores de referência para canvas 1600x1600)
+        self.normal_ref_width = int(os.getenv("NORMAL_REF_WIDTH", "1600"))
+        self.normal_ref_height = int(os.getenv("NORMAL_REF_HEIGHT", "1600"))
+        self.normal_rect_base_x1 = int(os.getenv("NORMAL_RECT_BASE_X1", "1254"))
+        self.normal_rect_base_y1 = int(os.getenv("NORMAL_RECT_BASE_Y1", "1390"))
+        self.normal_rect_base_w = int(os.getenv("NORMAL_RECT_BASE_W", "183"))
+        self.normal_rect_base_h = int(os.getenv("NORMAL_RECT_BASE_H", "45"))
         self.normal_rect_expand_w_factor = float(os.getenv("NORMAL_RECT_EXPAND_W_FACTOR", "1.10"))
 
-        # Limpeza opcional de texto (imagens normais)
+        # Limpeza opcional de texto na base (imagens normais)
         self.enable_text_cleanup = os.getenv("NORMAL_TEXT_CLEANUP", "false").lower() in ("1", "true", "yes")
         self.text_cleanup_focus_bottom_pct = float(os.getenv("NORMAL_TEXT_FOCUS_BOTTOM_PCT", "0.25"))
 
@@ -208,42 +207,55 @@ class ImageProcessorService:
         try:
             img = Image.open(image_path)
             img = img.convert('RGB')
-
+            
+            # Dimensões reais da imagem
             img_width, img_height = img.size
 
-            # Limpeza opcional de texto na faixa inferior
+            if img_width <= 0 or img_height <= 0:
+                return img
+
+            # Limpeza de texto opcional antes de sobrepor o retângulo
             if self.enable_text_cleanup:
                 try:
                     img_np = np.array(img)
-                    cleaned_np = self._remove_text_regions_opencv(img_np)
-                    if cleaned_np is not None:
-                        img = Image.fromarray(cleaned_np)
-                except Exception:
-                    pass
+                    cleaned = self._remove_text_regions_opencv(img_np)
+                    if cleaned is not None:
+                        img = Image.fromarray(cleaned)
+                except Exception as cleanup_err:
+                    logger.warning(f"Falha na limpeza de texto (ignorado): {cleanup_err}")
 
-            # Retângulo proporcional ancorado pelo canto inferior direito (x2,y2)
-            rect_w = max(1, int(round(self.normal_rect_w_pct * img_width)))
-            rect_h = max(1, int(round(self.normal_rect_h_pct * img_height)))
-            x2_int = int(round(self.normal_rect_x2_pct * img_width))
-            y2_int = int(round(self.normal_rect_y2_pct * img_height))
+            # Escalar retângulo a partir dos valores de referência
+            scale_x = img_width / max(1, self.normal_ref_width)
+            scale_y = img_height / max(1, self.normal_ref_height)
 
-            # Expansão 10% para a esquerda mantendo x2 fixo
+            base_x1 = int(round(self.normal_rect_base_x1 * scale_x))
+            base_y1 = int(round(self.normal_rect_base_y1 * scale_y))
+            rect_w = max(1, int(round(self.normal_rect_base_w * scale_x)))
+            rect_h = max(1, int(round(self.normal_rect_base_h * scale_y)))
+
+            # Aumentar 10% da largura para a esquerda (variável via env)
+            base_x2 = base_x1 + rect_w
             new_rect_w = max(1, int(round(rect_w * self.normal_rect_expand_w_factor)))
-            intended_x1 = x2_int - new_rect_w
-            intended_y1 = y2_int - rect_h
-            intended_x2 = x2_int
-            intended_y2 = y2_int
 
-            # Clamp dentro da imagem
+            intended_x1 = base_x2 - new_rect_w
+            intended_y1 = base_y1
+            intended_x2 = base_x2
+            intended_y2 = base_y1 + rect_h
+
+            # Ajuste/clamp para ficar dentro da imagem
             x1 = max(0, min(intended_x1, img_width))
             y1 = max(0, min(intended_y1, img_height))
             x2 = max(0, min(intended_x2, img_width))
             y2 = max(0, min(intended_y2, img_height))
 
+            # Se após o clamp o retângulo ficou inválido (sem área), pular sem erro
             if x2 <= x1 or y2 <= y1:
-                logger.info(f"Skip white rectangle: out-of-bounds for image {img_width}x{img_height}")
+                logger.info(
+                    f"Skip white rectangle: out-of-bounds for image {img_width}x{img_height}"
+                )
                 return img
 
+            # Desenhar quadrado branco
             draw = ImageDraw.Draw(img)
             draw.rectangle([x1, y1, x2, y2], fill='white')
             
@@ -254,15 +266,11 @@ class ImageProcessorService:
             return None
 
     def _remove_text_regions_opencv(self, img_rgb: np.ndarray) -> Optional[np.ndarray]:
-        """Remove textos na região inferior usando binarização adaptativa e inpaint.
-        - Converte para escala de cinza
-        - Foca na faixa inferior (percentual configurável)
-        - Realça texto com threshold adaptativo + morfologia
-        - Faz inpainting nas máscaras detectadas
-        """
+        """Remove textos na região inferior usando OpenCV (inpainting)."""
         try:
             if img_rgb is None or img_rgb.size == 0:
                 return None
+
             h, w = img_rgb.shape[:2]
             focus_h = max(1, int(h * self.text_cleanup_focus_bottom_pct))
             y_start = max(0, h - focus_h)
@@ -270,8 +278,14 @@ class ImageProcessorService:
             gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
             roi = gray[y_start:h, 0:w]
 
-            thr = cv2.adaptiveThreshold(roi, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                         cv2.THRESH_BINARY_INV, 15, 10)
+            thr = cv2.adaptiveThreshold(
+                roi,
+                255,
+                cv2.ADAPTIVE_THRESH_MEAN_C,
+                cv2.THRESH_BINARY_INV,
+                15,
+                10,
+            )
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
             morph = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=2)
             dil = cv2.dilate(morph, kernel, iterations=1)
