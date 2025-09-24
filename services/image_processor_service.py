@@ -588,6 +588,7 @@ NEGATIVE PROMPT: Do not: add/create/generate text, numbers, dimensions, units, a
 TASK
 - Remove all watermarks.
 - Keep ONLY the product as in the original.
+- Detect any supplier stamp in the bottom-right corner following the pattern "000.000" (three digits, dot, three digits) and erase it completely without affecting nearby pixels.
 
 STRICT RULES
 - Preserve pixel geometry, colors, textures, shadows of the product.
