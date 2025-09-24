@@ -35,8 +35,8 @@ class ImageProcessorService:
         self.save_files = os.getenv("SAVE_OUTPUT_FILES", "false").lower() in ("1", "true", "yes")
         
         # Limites (podem ser customizados por ENV)
-        self.rps_limit = int(os.getenv("DASHSCOPE_RPS_LIMIT", "10"))
-        self.max_concurrent = int(os.getenv("DASHSCOPE_MAX_CONCURRENT", "10"))
+        self.rps_limit = int(os.getenv("DASHSCOPE_RPS_LIMIT", "2"))
+        self.max_concurrent = int(os.getenv("DASHSCOPE_MAX_CONCURRENT", "2"))
         self.free_quota = int(os.getenv("DASHSCOPE_FREE_QUOTA", "100"))
         
         # Concurrency control
@@ -203,26 +203,11 @@ class ImageProcessorService:
             img_width, img_height = img.size
             base_x2 = base_x1 + rect_w
             new_rect_w = int(round(rect_w * 1.10))
-
-            # Coordenadas pretendidas
-            intended_x1 = base_x2 - new_rect_w
-            intended_y1 = base_y1
-            intended_x2 = base_x2
-            intended_y2 = base_y1 + rect_h
-
-            # Ajuste/clamp para ficar dentro da imagem
-            x1 = max(0, min(intended_x1, img_width))
-            y1 = max(0, min(intended_y1, img_height))
-            x2 = max(0, min(intended_x2, img_width))
-            y2 = max(0, min(intended_y2, img_height))
-
-            # Se após o clamp o retângulo ficou inválido (sem área), pular sem erro
-            if x2 <= x1 or y2 <= y1:
-                logger.info(
-                    f"Skip white rectangle: out-of-bounds for image {img_width}x{img_height}"
-                )
-                return img
-
+            x1 = max(0, base_x2 - new_rect_w)
+            y1 = base_y1
+            x2 = min(img_width, base_x2)
+            y2 = min(img_height, y1 + rect_h)
+            
             # Desenhar quadrado branco
             draw = ImageDraw.Draw(img)
             draw.rectangle([x1, y1, x2, y2], fill='white')
@@ -264,14 +249,6 @@ class ImageProcessorService:
             logger.error(f"Erro ao converter arquivo para base64: {e}")
             return None
 
-    async def encode_image_file_to_base64_async(self, image_path: str) -> Optional[str]:
-        """Versão assíncrona para evitar bloqueio ao ler arquivos grandes."""
-        try:
-            return await asyncio.to_thread(self.encode_image_file_to_base64, image_path)
-        except Exception as e:
-            logger.error(f"Erro ao converter arquivo para base64 (async): {e}")
-            return None
-
     def download_image_to_tempfile(self, url: str) -> Optional[str]:
         """Baixa uma imagem para um arquivo temporário e retorna o caminho."""
         try:
@@ -288,14 +265,6 @@ class ImageProcessorService:
             return temp_path
         except Exception as e:
             logger.error(f"Erro ao baixar imagem da URL: {e}")
-            return None
-
-    async def download_image_to_tempfile_async(self, url: str) -> Optional[str]:
-        """Versão assíncrona usando thread pool para não bloquear o loop."""
-        try:
-            return await asyncio.to_thread(self.download_image_to_tempfile, url)
-        except Exception as e:
-            logger.error(f"Erro ao baixar imagem da URL (async): {e}")
             return None
 
     async def generate_from_qwen(self, image, prompt, original_filename):

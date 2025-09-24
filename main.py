@@ -379,7 +379,7 @@ async def process_image_from_url(
             detected_type = "technical" if "_tec" in filename_lower else "normal"
 
         # Baixar imagem para arquivo temporário
-        temp_path = await image_processor_service.download_image_to_tempfile_async(request.url)
+        temp_path = image_processor_service.download_image_to_tempfile(request.url)
         if not temp_path:
             raise HTTPException(status_code=400, detail="Falha ao baixar a imagem da URL")
 
@@ -425,7 +425,7 @@ async def process_image_from_url(
         # - Caso contrário, usar base64 retornado pelo serviço (modo consulta)
         final_base64 = ""
         if result.get("path"):
-            final_base64 = await image_processor_service.encode_image_file_to_base64_async(result["path"]) or ""
+            final_base64 = image_processor_service.encode_image_file_to_base64(result["path"]) or ""
         else:
             final_base64 = result.get("base64") or ""
 
@@ -475,7 +475,7 @@ async def process_images_batch(
                 filename_lower = url.lower()
                 detected_type = "technical" if "_tec" in filename_lower else "normal"
 
-                temp_path = await image_processor_service.download_image_to_tempfile_async(url)
+                temp_path = image_processor_service.download_image_to_tempfile(url)
                 if not temp_path:
                     return ImageUrlProcessResponse(
                         success=False,
@@ -530,7 +530,7 @@ async def process_images_batch(
                     )
 
                 if result.get("path"):
-                    final_base64 = await image_processor_service.encode_image_file_to_base64_async(result["path"]) or ""
+                    final_base64 = image_processor_service.encode_image_file_to_base64(result["path"]) or ""
                 else:
                     final_base64 = result.get("base64") or ""
 
