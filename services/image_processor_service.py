@@ -14,8 +14,6 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 from PIL import Image, ImageDraw, ImageChops
-import numpy as np
-import cv2
 from datetime import datetime
 from dotenv import load_dotenv
 import uuid
@@ -65,19 +63,6 @@ class ImageProcessorService:
         # Diretórios de saída
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
-
-        # Configuração do retângulo para imagens normais (valores de referência para canvas 1600x1600)
-        self.normal_ref_width = int(os.getenv("NORMAL_REF_WIDTH", "1600"))
-        self.normal_ref_height = int(os.getenv("NORMAL_REF_HEIGHT", "1600"))
-        self.normal_rect_base_x1 = int(os.getenv("NORMAL_RECT_BASE_X1", "1254"))
-        self.normal_rect_base_y1 = int(os.getenv("NORMAL_RECT_BASE_Y1", "1390"))
-        self.normal_rect_base_w = int(os.getenv("NORMAL_RECT_BASE_W", "183"))
-        self.normal_rect_base_h = int(os.getenv("NORMAL_RECT_BASE_H", "45"))
-        self.normal_rect_expand_w_factor = float(os.getenv("NORMAL_RECT_EXPAND_W_FACTOR", "1.10"))
-
-        # Limpeza opcional de texto na base (imagens normais)
-        self.enable_text_cleanup = os.getenv("NORMAL_TEXT_CLEANUP", "false").lower() in ("1", "true", "yes")
-        self.text_cleanup_focus_bottom_pct = float(os.getenv("NORMAL_TEXT_FOCUS_BOTTOM_PCT", "0.25"))
 
     def _load_quota_state(self):
         try:
@@ -208,35 +193,18 @@ class ImageProcessorService:
             img = Image.open(image_path)
             img = img.convert('RGB')
             
-            # Dimensões reais da imagem
+            # Coordenadas base do retângulo branco (largura 183, altura 45)
+            base_x1 = 1254
+            base_y1 = 1390
+            rect_w = 183
+            rect_h = 45
+
+            # Aumentar 10% da largura do retângulo para a esquerda, mantendo a borda direita fixa
             img_width, img_height = img.size
-
-            if img_width <= 0 or img_height <= 0:
-                return img
-
-            # Limpeza de texto opcional antes de sobrepor o retângulo
-            if self.enable_text_cleanup:
-                try:
-                    img_np = np.array(img)
-                    cleaned = self._remove_text_regions_opencv(img_np)
-                    if cleaned is not None:
-                        img = Image.fromarray(cleaned)
-                except Exception as cleanup_err:
-                    logger.warning(f"Falha na limpeza de texto (ignorado): {cleanup_err}")
-
-            # Escalar retângulo a partir dos valores de referência
-            scale_x = img_width / max(1, self.normal_ref_width)
-            scale_y = img_height / max(1, self.normal_ref_height)
-
-            base_x1 = int(round(self.normal_rect_base_x1 * scale_x))
-            base_y1 = int(round(self.normal_rect_base_y1 * scale_y))
-            rect_w = max(1, int(round(self.normal_rect_base_w * scale_x)))
-            rect_h = max(1, int(round(self.normal_rect_base_h * scale_y)))
-
-            # Aumentar 10% da largura para a esquerda (variável via env)
             base_x2 = base_x1 + rect_w
-            new_rect_w = max(1, int(round(rect_w * self.normal_rect_expand_w_factor)))
+            new_rect_w = int(round(rect_w * 1.10))
 
+            # Coordenadas pretendidas
             intended_x1 = base_x2 - new_rect_w
             intended_y1 = base_y1
             intended_x2 = base_x2
@@ -263,39 +231,6 @@ class ImageProcessorService:
             
         except Exception as e:
             logger.error(f"Erro ao preprocessar imagem normal: {e}")
-            return None
-
-    def _remove_text_regions_opencv(self, img_rgb: np.ndarray) -> Optional[np.ndarray]:
-        """Remove textos na região inferior usando OpenCV (inpainting)."""
-        try:
-            if img_rgb is None or img_rgb.size == 0:
-                return None
-
-            h, w = img_rgb.shape[:2]
-            focus_h = max(1, int(h * self.text_cleanup_focus_bottom_pct))
-            y_start = max(0, h - focus_h)
-
-            gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-            roi = gray[y_start:h, 0:w]
-
-            thr = cv2.adaptiveThreshold(
-                roi,
-                255,
-                cv2.ADAPTIVE_THRESH_MEAN_C,
-                cv2.THRESH_BINARY_INV,
-                15,
-                10,
-            )
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            morph = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=2)
-            dil = cv2.dilate(morph, kernel, iterations=1)
-
-            mask = np.zeros((h, w), dtype=np.uint8)
-            mask[y_start:h, 0:w] = dil
-
-            inpainted = cv2.inpaint(img_rgb, mask, 3, cv2.INPAINT_TELEA)
-            return inpainted
-        except Exception:
             return None
 
     def encode_image_to_data_uri(self, image):
