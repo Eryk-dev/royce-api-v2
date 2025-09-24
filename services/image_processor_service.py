@@ -66,19 +66,18 @@ class ImageProcessorService:
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
 
-        # Referências para posicionamento proporcional do retângulo em imagens normais
-        # Base adotada: 1600x1600 (ajustável por ENV)
-        self.normal_ref_width = int(os.getenv("NORMAL_REF_WIDTH", "1600"))
-        self.normal_ref_height = int(os.getenv("NORMAL_REF_HEIGHT", "1600"))
-        # Métricas base do retângulo (antes de aplicar o aumento de 10%)
-        self.normal_rect_base_x1 = int(os.getenv("NORMAL_RECT_BASE_X1", "1254"))
-        self.normal_rect_base_y1 = int(os.getenv("NORMAL_RECT_BASE_Y1", "1390"))
-        self.normal_rect_base_w = int(os.getenv("NORMAL_RECT_BASE_W", "183"))
-        self.normal_rect_base_h = int(os.getenv("NORMAL_RECT_BASE_H", "45"))
+        # Configuração de retângulo proporcional (imagens normais)
+        # Padrões baseados na referência 1600x1600 onde:
+        # - x2% ≈ 0.898, y2% ≈ 0.897 (âncora canto inferior direito)
+        # - largura% ≈ 0.114 e altura% ≈ 0.028125
+        self.normal_rect_x2_pct = float(os.getenv("NORMAL_RECT_X2_PCT", "0.898"))
+        self.normal_rect_y2_pct = float(os.getenv("NORMAL_RECT_Y2_PCT", "0.897"))
+        self.normal_rect_w_pct = float(os.getenv("NORMAL_RECT_W_PCT", "0.114"))
+        self.normal_rect_h_pct = float(os.getenv("NORMAL_RECT_H_PCT", "0.028125"))
+        self.normal_rect_expand_w_factor = float(os.getenv("NORMAL_RECT_EXPAND_W_FACTOR", "1.10"))
 
-        # Remoção automática de texto (apenas imagens normais)
+        # Limpeza opcional de texto (imagens normais)
         self.enable_text_cleanup = os.getenv("NORMAL_TEXT_CLEANUP", "false").lower() in ("1", "true", "yes")
-        # Região prioritária (percentual da altura a partir da base) para procurar watermark/rodapé
         self.text_cleanup_focus_bottom_pct = float(os.getenv("NORMAL_TEXT_FOCUS_BOTTOM_PCT", "0.25"))
 
     def _load_quota_state(self):
@@ -204,69 +203,47 @@ class ImageProcessorService:
     def preprocess_normal_image(self, image_path):
         """
         Preprocessa imagem normal:
-        Adiciona quadrado branco proporcional ao tamanho da imagem
-        (regra de 3 baseada em resolução de referência) e AUMENTA 10% para a esquerda
-        mantendo a borda direita fixa.
+        Adiciona quadrado branco e AUMENTA 10% para a esquerda (sem deslocar a borda direita)
         """
         try:
             img = Image.open(image_path)
             img = img.convert('RGB')
 
-            # Opcional: tentar limpar textos/watermarks no rodapé/zona inferior
+            img_width, img_height = img.size
+
+            # Limpeza opcional de texto na faixa inferior
             if self.enable_text_cleanup:
                 try:
                     img_np = np.array(img)
                     cleaned_np = self._remove_text_regions_opencv(img_np)
                     if cleaned_np is not None:
                         img = Image.fromarray(cleaned_np)
-                except Exception as _:
+                except Exception:
                     pass
-            
-            # Coordenadas base do retângulo branco (na resolução de referência)
-            base_x1 = self.normal_rect_base_x1
-            base_y1 = self.normal_rect_base_y1
-            rect_w = self.normal_rect_base_w
-            rect_h = self.normal_rect_base_h
 
-            # Aumentar 10% da largura do retângulo para a esquerda, mantendo a borda direita fixa
-            img_width, img_height = img.size
-            ref_w = self.normal_ref_width
-            ref_h = self.normal_ref_height
+            # Retângulo proporcional ancorado pelo canto inferior direito (x2,y2)
+            rect_w = max(1, int(round(self.normal_rect_w_pct * img_width)))
+            rect_h = max(1, int(round(self.normal_rect_h_pct * img_height)))
+            x2_int = int(round(self.normal_rect_x2_pct * img_width))
+            y2_int = int(round(self.normal_rect_y2_pct * img_height))
 
-            # Escalar posição e tamanho pela regra de 3
-            # Posições inteiras finais arredondadas
-            scaled_x1 = int(round(base_x1 * img_width / ref_w))
-            scaled_y1 = int(round(base_y1 * img_height / ref_h))
-            scaled_w  = int(round(rect_w * img_width / ref_w))
-            scaled_h  = int(round(rect_h * img_height / ref_h))
+            # Expansão 10% para a esquerda mantendo x2 fixo
+            new_rect_w = max(1, int(round(rect_w * self.normal_rect_expand_w_factor)))
+            intended_x1 = x2_int - new_rect_w
+            intended_y1 = y2_int - rect_h
+            intended_x2 = x2_int
+            intended_y2 = y2_int
 
-            # Garante tamanhos mínimos positivos
-            scaled_w = max(1, scaled_w)
-            scaled_h = max(1, scaled_h)
-
-            base_x2 = scaled_x1 + scaled_w
-            new_rect_w = int(round(scaled_w * 1.10))
-
-            # Coordenadas pretendidas já proporcionais
-            intended_x1 = base_x2 - new_rect_w
-            intended_y1 = scaled_y1
-            intended_x2 = base_x2
-            intended_y2 = scaled_y1 + scaled_h
-
-            # Ajuste/clamp para ficar dentro da imagem
+            # Clamp dentro da imagem
             x1 = max(0, min(intended_x1, img_width))
             y1 = max(0, min(intended_y1, img_height))
             x2 = max(0, min(intended_x2, img_width))
             y2 = max(0, min(intended_y2, img_height))
 
-            # Se após o clamp o retângulo ficou inválido (sem área), pular sem erro
             if x2 <= x1 or y2 <= y1:
-                logger.info(
-                    f"Skip white rectangle: out-of-bounds for image {img_width}x{img_height}"
-                )
+                logger.info(f"Skip white rectangle: out-of-bounds for image {img_width}x{img_height}")
                 return img
 
-            # Desenhar quadrado branco
             draw = ImageDraw.Draw(img)
             draw.rectangle([x1, y1, x2, y2], fill='white')
             
@@ -276,42 +253,33 @@ class ImageProcessorService:
             logger.error(f"Erro ao preprocessar imagem normal: {e}")
             return None
 
-    def _remove_text_regions_opencv(self, img_bgr: np.ndarray) -> Optional[np.ndarray]:
+    def _remove_text_regions_opencv(self, img_rgb: np.ndarray) -> Optional[np.ndarray]:
         """Remove textos na região inferior usando binarização adaptativa e inpaint.
-        Estratégia simples:
         - Converte para escala de cinza
         - Foca na faixa inferior (percentual configurável)
         - Realça texto com threshold adaptativo + morfologia
         - Faz inpainting nas máscaras detectadas
         """
         try:
-            if img_bgr is None or img_bgr.size == 0:
+            if img_rgb is None or img_rgb.size == 0:
                 return None
-
-            h, w = img_bgr.shape[:2]
+            h, w = img_rgb.shape[:2]
             focus_h = max(1, int(h * self.text_cleanup_focus_bottom_pct))
             y_start = max(0, h - focus_h)
 
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_RGB2GRAY)
+            gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
             roi = gray[y_start:h, 0:w]
 
-            # Realçar texto (geralmente escuro sobre claro)
             thr = cv2.adaptiveThreshold(roi, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                        cv2.THRESH_BINARY_INV, 15, 10)
-
-            # Morfologia para conectar caracteres
+                                         cv2.THRESH_BINARY_INV, 15, 10)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
             morph = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-            # Expandir levemente
             dil = cv2.dilate(morph, kernel, iterations=1)
 
-            # Montar máscara no espaço original
             mask = np.zeros((h, w), dtype=np.uint8)
             mask[y_start:h, 0:w] = dil
 
-            # Aplicar inpainting
-            inpainted = cv2.inpaint(img_bgr, mask, 3, cv2.INPAINT_TELEA)
+            inpainted = cv2.inpaint(img_rgb, mask, 3, cv2.INPAINT_TELEA)
             return inpainted
         except Exception:
             return None
