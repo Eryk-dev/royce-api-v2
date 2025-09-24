@@ -11,14 +11,23 @@ import logging
 import asyncio
 import json
 import time
+import re
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple, List
 from PIL import Image, ImageDraw, ImageChops
 from datetime import datetime
 from dotenv import load_dotenv
 import uuid
 import tempfile
 from collections import deque
+import numpy as np
+import cv2
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    print("Tesseract não disponível. Instale com: pip install pytesseract")
 class QuotaExceededError(Exception):
     """Erro lançado quando a cota gratuita é excedida."""
 
@@ -63,6 +72,11 @@ class ImageProcessorService:
         # Diretórios de saída
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
+        
+        # Configuração de detecção de código do fornecedor
+        self.enable_supplier_code_detection = os.getenv("ENABLE_SUPPLIER_CODE_DETECTION", "true").lower() in ("1", "true", "yes")
+        self.supplier_code_bottom_percent = float(os.getenv("SUPPLIER_CODE_BOTTOM_PERCENT", "0.25"))
+        self.supplier_code_right_percent = float(os.getenv("SUPPLIER_CODE_RIGHT_PERCENT", "0.4"))
 
     def _load_quota_state(self):
         try:
@@ -184,33 +198,181 @@ class ImageProcessorService:
             logger.error(f"Erro ao preprocessar imagem técnica: {e}")
             return None
 
+    def detect_supplier_code_by_contours(self, img: Image.Image) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Detecta código do fornecedor usando análise de contornos no canto inferior direito.
+        Procura por grupos de texto que parecem ser o padrão '000.000'.
+        """
+        try:
+            width, height = img.size
+            
+            # Focar no canto inferior direito (40% da direita, 25% de baixo)
+            crop_x1 = int(width * (1 - self.supplier_code_right_percent))
+            crop_y1 = int(height * (1 - self.supplier_code_bottom_percent))
+            
+            # Fazer crop da região
+            roi = img.crop((crop_x1, crop_y1, width, height))
+            roi_np = np.array(roi)
+            
+            # Converter para escala de cinza
+            gray = cv2.cvtColor(roi_np, cv2.COLOR_RGB2GRAY)
+            
+            # Aplicar detecção de bordas para encontrar texto
+            edges = cv2.Canny(gray, 50, 150)
+            
+            # Dilatação para conectar componentes de texto
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 8))
+            dilated = cv2.dilate(edges, kernel, iterations=1)
+            
+            # Encontrar contornos
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Filtrar contornos que parecem texto no formato código
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Filtros para identificar possível código: 
+                # - proporção largura/altura típica de "000.000"
+                # - tamanho adequado
+                aspect_ratio = w / h if h > 0 else 0
+                
+                if 3 < aspect_ratio < 8 and 40 < w < 200 and 10 < h < 50:
+                    # Coordenadas absolutas
+                    abs_x1 = crop_x1 + x - 5
+                    abs_y1 = crop_y1 + y - 3
+                    abs_x2 = crop_x1 + x + w + 5
+                    abs_y2 = crop_y1 + y + h + 3
+                    
+                    # Garantir limites
+                    abs_x1 = max(0, abs_x1)
+                    abs_y1 = max(0, abs_y1)
+                    abs_x2 = min(width, abs_x2)
+                    abs_y2 = min(height, abs_y2)
+                    
+                    logger.info(f"Possível código detectado por contornos em: ({abs_x1}, {abs_y1}, {abs_x2}, {abs_y2})")
+                    return (abs_x1, abs_y1, abs_x2, abs_y2)
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Erro ao detectar código por contornos: {e}")
+            return None
+    
+    def detect_supplier_code(self, img: Image.Image) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Detecta código do fornecedor no formato '000.000' no canto inferior direito.
+        Tenta primeiro com OCR (se disponível), depois com análise de contornos.
+        """
+        # Tentar com Tesseract primeiro se disponível
+        if TESSERACT_AVAILABLE:
+            try:
+                width, height = img.size
+                
+                # Focar apenas no canto inferior direito
+                crop_x1 = int(width * (1 - self.supplier_code_right_percent))
+                crop_y1 = int(height * (1 - self.supplier_code_bottom_percent))
+                
+                # Fazer crop da região de interesse
+                roi = img.crop((crop_x1, crop_y1, width, height))
+                roi_np = np.array(roi)
+                
+                # Pré-processar para melhorar OCR
+                gray = cv2.cvtColor(roi_np, cv2.COLOR_RGB2GRAY)
+                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+                
+                # OCR com pytesseract
+                ocr_data = pytesseract.image_to_data(thresh, output_type=pytesseract.Output.DICT)
+                
+                # Padrão para buscar: 3 dígitos, ponto, 3 dígitos
+                pattern = re.compile(r'^\d{3}\.\d{3}$')
+                
+                # Buscar o padrão nos resultados do OCR
+                for i, text in enumerate(ocr_data['text']):
+                    if text and pattern.match(text.strip()):
+                        # Coordenadas relativas ao ROI
+                        x = ocr_data['left'][i]
+                        y = ocr_data['top'][i]
+                        w = ocr_data['width'][i]
+                        h = ocr_data['height'][i]
+                        
+                        # Converter para coordenadas absolutas com margem extra
+                        abs_x1 = crop_x1 + x - 10
+                        abs_y1 = crop_y1 + y - 5
+                        abs_x2 = crop_x1 + x + w + 10
+                        abs_y2 = crop_y1 + y + h + 5
+                        
+                        # Garantir limites
+                        abs_x1 = max(0, abs_x1)
+                        abs_y1 = max(0, abs_y1)
+                        abs_x2 = min(width, abs_x2)
+                        abs_y2 = min(height, abs_y2)
+                        
+                        logger.info(f"Código do fornecedor detectado via OCR: {text} em ({abs_x1}, {abs_y1}, {abs_x2}, {abs_y2})")
+                        return (abs_x1, abs_y1, abs_x2, abs_y2)
+                        
+            except Exception as e:
+                logger.warning(f"OCR falhou, tentando detecção por contornos: {e}")
+        
+        # Se OCR não está disponível ou não funcionou, tentar detecção por contornos
+        return self.detect_supplier_code_by_contours(img)
+
     def preprocess_normal_image(self, image_path):
         """
         Preprocessa imagem normal:
-        Adiciona quadrado branco e AUMENTA 10% para a esquerda (sem deslocar a borda direita)
+        1. Detecta e remove código do fornecedor (formato 000.000) via OCR
+        2. Se não detectar, aplica quadrado branco em posição fixa como fallback
         """
         try:
             img = Image.open(image_path)
             img = img.convert('RGB')
             
-            # Coordenadas base do retângulo branco (largura 183, altura 45)
-            base_x1 = 1254
-            base_y1 = 1390
-            rect_w = 183
-            rect_h = 45
-
-            # Aumentar 10% da largura do retângulo para a esquerda, mantendo a borda direita fixa
             img_width, img_height = img.size
-            base_x2 = base_x1 + rect_w
-            new_rect_w = int(round(rect_w * 1.10))
-            x1 = max(0, base_x2 - new_rect_w)
-            y1 = base_y1
-            x2 = min(img_width, base_x2)
-            y2 = min(img_height, y1 + rect_h)
-            
-            # Desenhar quadrado branco
             draw = ImageDraw.Draw(img)
-            draw.rectangle([x1, y1, x2, y2], fill='white')
+            
+            # Tentar detectar e cobrir código do fornecedor (se habilitado)
+            supplier_coords = None
+            if self.enable_supplier_code_detection:
+                supplier_coords = self.detect_supplier_code(img)
+            
+            if supplier_coords:
+                # Cobrir código detectado com retângulo branco
+                x1, y1, x2, y2 = supplier_coords
+                draw.rectangle([x1, y1, x2, y2], fill='white')
+                logger.info(f"Código do fornecedor coberto via OCR em: {supplier_coords}")
+            else:
+                # Fallback: usar coordenadas fixas se OCR não detectar
+                # Coordenadas base do retângulo branco (largura 183, altura 45)
+                base_x1 = 1254
+                base_y1 = 1390
+                rect_w = 183
+                rect_h = 45
+
+                # Verificar se as coordenadas fazem sentido para esta imagem
+                if img_width >= base_x1 + rect_w and img_height >= base_y1 + rect_h:
+                    # Aumentar 10% da largura do retângulo para a esquerda, mantendo a borda direita fixa
+                    base_x2 = base_x1 + rect_w
+                    new_rect_w = int(round(rect_w * 1.10))
+                    x1 = max(0, base_x2 - new_rect_w)
+                    y1 = base_y1
+                    x2 = min(img_width, base_x2)
+                    y2 = min(img_height, y1 + rect_h)
+                    
+                    draw.rectangle([x1, y1, x2, y2], fill='white')
+                    logger.info("Aplicado retângulo fixo como fallback (OCR não detectou código)")
+                else:
+                    # Para imagens menores, tentar cobrir canto inferior direito proporcionalmente
+                    margin_x = int(img_width * 0.15)  # 15% da largura
+                    margin_y = int(img_height * 0.05)  # 5% da altura
+                    rect_width = int(img_width * 0.12)  # 12% da largura
+                    rect_height = int(img_height * 0.03)  # 3% da altura
+                    
+                    x1 = img_width - margin_x - rect_width
+                    y1 = img_height - margin_y - rect_height
+                    x2 = img_width - margin_x
+                    y2 = img_height - margin_y
+                    
+                    draw.rectangle([x1, y1, x2, y2], fill='white')
+                    logger.info(f"Aplicado retângulo proporcional para imagem {img_width}x{img_height}")
             
             return img
             
@@ -588,7 +750,6 @@ NEGATIVE PROMPT: Do not: add/create/generate text, numbers, dimensions, units, a
 TASK
 - Remove all watermarks.
 - Keep ONLY the product as in the original.
-- Detect any supplier stamp in the bottom-right corner following the pattern "000.000" (three digits, dot, three digits) and erase it completely without affecting nearby pixels.
 
 STRICT RULES
 - Preserve pixel geometry, colors, textures, shadows of the product.
