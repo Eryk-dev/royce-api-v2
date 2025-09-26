@@ -18,14 +18,18 @@ class JSONProcessorService:
         load_dotenv()
         
         self.api_key = os.getenv('GEMINI_API_KEY')
+        self.model = None
         
         if self.api_key:
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel('gemini-2.5-pro')
-            logger.info("Gemini API configurada com sucesso")
+            try:
+                genai.configure(api_key=self.api_key)
+                self.model = genai.GenerativeModel('gemini-2.5-flash')
+                logger.info("Gemini API configurada com sucesso")
+            except Exception as e:
+                logger.error(f"Erro ao configurar Gemini API: {e}")
+                self.model = None
         else:
             logger.warning("GEMINI_API_KEY não encontrada")
-            self.model = None
 
     def create_transformation_prompt(self, source_data: Dict[str, Any]) -> str:
         """

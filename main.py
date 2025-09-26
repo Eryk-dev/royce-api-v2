@@ -155,12 +155,16 @@ async def health_check():
         "image_processor": "operational"
     }
     
-    # Verificar se as chaves de API estão configuradas
+    # Verificar se as chaves de API estão configuradas e serviços inicializados
     if not os.getenv("GEMINI_API_KEY"):
         services_status["json_processor"] = "degraded - missing GEMINI_API_KEY"
+    elif not json_processor_service.model:
+        services_status["json_processor"] = "degraded - model not initialized"
     
     if not os.getenv("DASHSCOPE_API_KEY"):
         services_status["image_processor"] = "degraded - missing DASHSCOPE_API_KEY"
+    elif not image_processor_service.api_key:
+        services_status["image_processor"] = "degraded - API key not loaded"
     
     return HealthResponse(
         status="healthy",

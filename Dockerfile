@@ -41,6 +41,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:5682/health || exit 1
 
 # Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5682", "--workers", "4"]
+# Use fewer workers in development to avoid resource conflicts
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5682", "--workers", "2"]
 
 
